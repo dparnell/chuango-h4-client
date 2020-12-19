@@ -34,7 +34,52 @@ export interface DeviceInfo {
     time: string;
     day: string;
     timezone: string;
+}
 
+export interface DeviceNode {
+    RF: string;
+    FTCode: string;
+    Index: string;
+    Ver: string;
+    UUID: string;
+    FuncType: string;
+    Value: string;
+    Unit: string;
+    Alarm24H: string;
+    ModeEnableList: string;
+    DisableSOS: string;
+    Chime: string;
+    AlarmDelayEnable: string;
+    UserName: string;
+    Update: string;
+    NewNick: string;
+}
+
+export interface SignalAttribute {
+    AttrValue: string;
+    AttrID: string;
+}
+
+export interface Device {
+    DevId: string;
+    DevName: string;
+    Icon: string;
+    Country: string;
+    RF: string;
+    NoticeFlag: string;
+    OFFLine: string;
+    GID: string;
+    DisPush: string;
+    NewNick: string;
+    EpId: string;
+    NodesList: DeviceNode[];
+    Signal: SignalAttribute;
+}
+
+
+type MessageHandler = (message: any) => void;
+interface MessageHandlers {
+    [key: string]: MessageHandler;
 }
 
 
@@ -43,6 +88,14 @@ export class DeviceConnection {
     private device: DeviceInfo;
     private alias: string;
     private clientId: string;
+    private handlers: MessageHandlers = {};
+    private model: string = "";
+    private online: boolean = false;
+    private devices: Device[] = [];
+
+    get Model() { return this.model }
+    get Online() { return this.online }
+    get Devices() { return this.devices }
 
     constructor(mqtt: AsyncMqttClient, deviceInfo: DeviceInfo, alias: string) {
         this.mqtt = mqtt;
@@ -51,10 +104,38 @@ export class DeviceConnection {
 
         this.clientId = "android_" + Math.floor(Math.random() * 1000000);
 
+        this.handlers["status_info"] = (msg) => {
+            if(msg.message && msg.message.response) {
+                let resp = msg.message.response;
+                if(resp) {
+                    this.model = resp.model;
+                    this.online = resp.online === "1";
+                }
+            }
+        };
+
+        this.handlers["update_devices"] = (msg) => {
+            if(msg.message && msg.message.response) {
+                let resp = msg.message.response;
+                if(resp) {
+                    // TODO: update the device array
+                }
+            }
+        };
+
         this.mqtt.on("message", (topic, message) => {
             const msg = JSON.parse(message.toString());
-            console.info(topic);
-            console.dir(msg, { depth: 10 });
+            if(msg.message && msg.message.response) {
+                let handler = this.handlers[msg.message.response.action];
+                if(handler) {
+                    handler(msg);
+                } else {
+                    console.dir([topic, "unhandled message", msg], { depth: 10});
+                }
+            } else {
+                console.info(topic);
+                console.dir(msg, { depth: 10 });
+            }
         });
     }
 
@@ -76,11 +157,29 @@ export class DeviceConnection {
         };
     }
 
-    public getAllDevices() {
-        let msg = this.buildK1ActionMessage("zwave", { action: "get_all_devices", status: "ok"});
-        this.send(msg);
-    }
+    public async getAllDevices(): Promise<Device[]> {
+        return new Promise<Device[]>((resolve, reject) => {
+            this.handlers["get_all_devices"] = (msg) => {
+                let resp = msg.message.response;
+                if(resp.clear_flag === "1") {
+                    this.devices = [];
+                }
 
+                if(resp.DevicesList) {
+                    for(let dev of resp.DevicesList) {
+                        this.devices.push(dev);
+                    }
+                }
+
+                if(resp.page_flag === "0") {
+                    resolve(this.devices);
+                }
+            };
+
+            let msg = this.buildK1ActionMessage("zwave", { action: "get_all_devices", status: "ok"});
+            this.send(msg);
+        });
+    }
 }
 
 export class Client {
