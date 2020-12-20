@@ -3,6 +3,7 @@ import axios from 'axios';
 import {AxiosInstance} from 'axios';
 import * as MQTT from 'async-mqtt';
 import {AsyncMqttClient} from 'async-mqtt';
+import { TypedEmitter } from 'tiny-typed-emitter';
 
 const DREAMCATCHER_ROOT = "dc11.iotdreamcatcher.net";
 const APP_VERSION = "1.8.2";
@@ -76,33 +77,120 @@ export interface Device {
     Signal: SignalAttribute;
 }
 
+export enum ArmState {
+    Home = 1,
+    Disarmed = 2,
+    Armed = 3,
+    SOS = 4
+}
+
+export interface AlarmState {
+    State: ArmState,
+    Alarm: boolean
+}
+
+export enum DeviceType {
+    DoorSendor = "SD",
+    PIRMotionSensor = "SI",
+    SmokeDetector = "SM",
+    CO2Detector = "SC",
+    FloodSensor = "SF",
+    LightSensor = "LM",
+    TemperatureSensor = "TP",
+    HumiditySensor = "HU",
+    WattSensor = "PW",
+    PowerSensor = "PE",
+    ElectricPlug = "PS",
+    Dimmer = "DM",
+    Lock = "LC",
+    Alarm = "CS",
+    Keypad = "KP",
+    InfraRedRemote = "IR",
+    RadioRemote = "RC",
+    CardReader = "RF"
+}
+
+export enum ItemEventType {
+    AbnormalEvent = "10",
+    SOSAlarm = "11",
+    Disarm = "12",
+    Arm = "13",
+    Home = "14",
+    Tamper = "15",
+    LowVoltage = "16",
+    DuressAlarm = "17",
+    OfflineAlarm = "18",
+    LineCutAlarm = "19",
+    PowerDisconnected = "20",
+    PowerConnected = "21",
+    BeyondLimitAlarm = "22",
+    AboveLimitAlarm = "23",
+    BelowLimitAlarm = "24",
+    DeviationAlarm = "25",
+    Alarm = "26",
+    ScheduledEvent = "27",
+    Guarding = "29",
+    OpenEvent = "30",
+    CloseEvent = "31",
+    OnEvent = "32",
+    OffEvent = "33",
+    ReminderEvent = "34"
+}
+
+export interface Alarm {
+    deviceID: string;
+    itemName: string;
+    itemID: string;
+    itemEvent: ItemEventType;
+    alarmType: string;
+    timeStamp: number;
+    dst: string;
+    timeZone: string;
+}
 
 type MessageHandler = (message: any) => void;
 interface MessageHandlers {
-    [key: string]: MessageHandler;
+    [key: string]: MessageHandler | null;
 }
 
+function ignore_message() {
+    // do nothing with the given message
+}
 
-export class DeviceConnection {
+interface ConnectionEvents {
+    'status': (online: boolean) => void;
+    'state': (state: AlarmState) => void;
+    'alarm': (alarm: Alarm) => void;
+}
+
+export class DeviceConnection extends TypedEmitter<ConnectionEvents> {
     private mqtt: AsyncMqttClient;
     private device: DeviceInfo;
-    private alias: string;
+    private client: Client;
     private clientId: string;
     private handlers: MessageHandlers = {};
     private model: string = "";
     private online: boolean = false;
     private devices: Device[] = [];
+    private alarm: AlarmState | null = null;
 
     get Model() { return this.model }
     get Online() { return this.online }
     get Devices() { return this.devices }
+    get Alarm() { return this.alarm }
 
-    constructor(mqtt: AsyncMqttClient, deviceInfo: DeviceInfo, alias: string) {
+    constructor(mqtt: AsyncMqttClient, deviceInfo: DeviceInfo, client: Client) {
+        super();
+
         this.mqtt = mqtt;
         this.device = deviceInfo;
-        this.alias = alias;
+        this.client = client;
 
         this.clientId = "android_" + Math.floor(Math.random() * 1000000);
+
+        this.handlers["device_info"] = ignore_message;
+        this.handlers["get_all_devices"] = ignore_message;
+        this.handlers["get_scene_current"] = ignore_message;
 
         this.handlers["status_info"] = (msg) => {
             if(msg.message && msg.message.response) {
@@ -110,6 +198,8 @@ export class DeviceConnection {
                 if(resp) {
                     this.model = resp.model;
                     this.online = resp.online === "1";
+
+                    this.emit("status", this.online);
                 }
             }
         };
@@ -118,23 +208,61 @@ export class DeviceConnection {
             if(msg.message && msg.message.response) {
                 let resp = msg.message.response;
                 if(resp) {
-                    // TODO: update the device array
+                    if(resp.DevicesList) {
+                        for(let dev of resp.DevicesList) {
+                            let idx = this.devices.findIndex((item) => item.DevId == dev.DevId);
+                            if(idx >= 0) {
+                                // replace the existing device entry
+                                this.devices[idx] = dev;
+                            } else {
+                                // device not found, so just add it in
+                                this.devices.push(dev);
+                            }
+                        }
+
+                    }
                 }
+            }
+        };
+
+        this.handlers["SceneUpdate"] = (msg) => {
+            if(msg.message && msg.message.response) {
+                let resp = msg.message.response;
+
+                this.alarm = {
+                    State: Number(resp.CurrentSceneId),
+                    Alarm: resp.AlarmState === '1'
+                };
+
+                this.emit("state", this.alarm);
+
+                let callback = this.handlers["get_scene_current"];
+                if(callback) {
+                    callback(msg);
+                }
+
             }
         };
 
         this.mqtt.on("message", (topic, message) => {
             const msg = JSON.parse(message.toString());
             if(msg.message && msg.message.response) {
-                let handler = this.handlers[msg.message.response.action];
-                if(handler) {
-                    handler(msg);
+                if(msg.message.subject == "Alarm") {
+                    this.emit("alarm", msg.message.response as Alarm);
                 } else {
-                    console.dir([topic, "unhandled message", msg], { depth: 10});
+                    let handler = this.handlers[msg.message.response.action];
+                    if(handler) {
+                        handler(msg);
+                    } else {
+                        console.dir(["unhandled message", topic, msg], { depth: 10});
+                    }
                 }
             } else {
-                console.info(topic);
-                console.dir(msg, { depth: 10 });
+                if(msg.msg === "online") {
+                    // do nothing
+                } else {
+                    console.dir(["unknown message", topic, msg, { depth: 10 }]);
+                }
             }
         });
     }
@@ -149,7 +277,7 @@ export class DeviceConnection {
                 type: "broadcast",
                 to: this.device.deviceID,
                 from: this.clientId,
-                username: this.alias,
+                username: this.client.Alias,
                 ack_mark: "0",
                 subject: subject,
                 request: request
@@ -172,11 +300,52 @@ export class DeviceConnection {
                 }
 
                 if(resp.page_flag === "0") {
+                    this.handlers["get_all_devices"] = ignore_message;
                     resolve(this.devices);
                 }
             };
 
             let msg = this.buildK1ActionMessage("zwave", { action: "get_all_devices", status: "ok"});
+            this.send(msg);
+        });
+    }
+
+    public async getCurrentAlarmState(): Promise<AlarmState> {
+        return new Promise<AlarmState>((resolve, reject) => {
+            this.handlers["get_scene_current"] = (msg) => {
+                if(msg.message && msg.message.response) {
+                    let resp = msg.message.response;
+
+                    if(resp.action == "SceneUpdate") {
+                        this.handlers["get_scene_current"] = ignore_message;
+                        resolve(this.Alarm!);
+                    }
+                }
+            };
+            let msg = this.buildK1ActionMessage("zwave", { action: "get_scene_current" });
+            this.send(msg);
+        });
+    }
+
+    public async setAlarmState(newState: ArmState): Promise<boolean> {
+        return new Promise<boolean>((resolve, reject) => {
+            this.handlers["set_scene_current"] = (msg) => {
+                if(msg.message && msg.message.response) {
+                    let resp = msg.message.response;
+
+                    if(resp.status == "ok") {
+                        this.alarm = {
+                            State: newState,
+                            Alarm: false
+                        };
+
+                        resolve(true);
+                    } else {
+                        reject(resp);
+                    }
+                }
+            };
+            let msg = this.buildK1ActionMessage("zwave", { action: "set_scene_current", Mail: this.client.Username, NewSceneId: String(newState) });
             this.send(msg);
         });
     }
@@ -190,6 +359,10 @@ export class Client {
     private uuid: string;
     private uib: Uib;
     private token: string;
+
+    public get Username() { return this.username }
+    public get Alias() { return this.alias }
+    public get Token() { return this.token }
 
     private constructor(client: AxiosInstance, options: any, username: string, alias: string, uuid: string, uib: Uib, token: string) {
         this.client = axios;
@@ -242,7 +415,7 @@ export class Client {
         const client = await MQTT.connectAsync("tls://" + device.cmdIP + ":8883", { clientId: String(Date.now()), username: "and_" + device.deviceID, password: this.token, rejectUnauthorized: false});
         client.subscribe("00s/01/x/300/" + device.deviceID +  "/set/#");
 
-        return new DeviceConnection(client, device, this.alias);
+        return new DeviceConnection(client, device, this);
     }
 
 }
