@@ -7,6 +7,10 @@
     "repository": "git@github.com:dparnell/chuango-h4-client.git",
     "author": "Daniel Parnell <me@danielparnell.com>",
     "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/dparnell/chuango-h4-client.git"
+    },
     "scripts": {
         "build": "tsc"
     },
